@@ -7,9 +7,6 @@ type Clip = {
   startSec: number
   gain: number
   peaks?: number[]
-  offsetSec: number
-  lengthSec: number
-  peaksStepSec: number
 }
 
 class Track {
@@ -82,10 +79,10 @@ class Track {
       gain.gain.value = clip.gain
       source.connect(gain)
       gain.connect(this.output)
-      const offsetInBuffer = clip.offsetSec + Math.max(0, positionSec - startSeconds)
-      const trimmedRemaining = Math.max(0, clip.lengthSec - Math.max(0, positionSec - startSeconds))
+      const offsetInBuffer = Math.max(0, positionSec - startSeconds)
+      const bufferRemaining = Math.max(0, source.buffer.duration - offsetInBuffer)
       const endLimit = Math.max(0, projectLengthSeconds - Math.max(startSeconds, positionSec))
-      const playSeconds = Math.min(trimmedRemaining, endLimit)
+      const playSeconds = Math.min(bufferRemaining, endLimit)
       if (playSeconds <= 0) continue
       source.start(when, offsetInBuffer, playSeconds)
       this.activeSources.push(source)
@@ -132,15 +129,15 @@ class AudioEngine {
 
   pause() {
     if (!this.isPlaying) return
-    this.positionSec = this.ctx.currentTime - this.playStartTime
+    const elapsed = this.ctx.currentTime - this.playStartTime
+    this.positionSec = this.positionSec + elapsed
     this.isPlaying = false
     for (const t of this.tracks) t.stopAll()
   }
 
   stop() {
-    if (this.isPlaying) {
-      this.positionSec = this.ctx.currentTime - this.playStartTime
-    }
+    const elapsed = this.ctx.currentTime - this.playStartTime
+    this.positionSec = this.positionSec + (this.isPlaying ? elapsed : 0)
     this.isPlaying = false
     for (const t of this.tracks) t.stopAll()
     this.positionSec = 0
@@ -170,11 +167,6 @@ const rowsRef = ref<HTMLElement | null>(null)
 const sidebarW = ref(360)
 const resizing = ref(false)
 const compact = computed(() => sidebarW.value < 260)
-const labelStep = computed(() => {
-  if (secPx.value < 24) return 10
-  if (secPx.value < 40) return 5
-  return 1
-})
 
 function addTrack() {
   const t = engine.createTrack()
@@ -196,8 +188,8 @@ async function onFilesSelected(e: Event, itemIndex: number) {
   for (const file of Array.from(files)) {
     const buffer = await engine.fileToBuffer(file)
     const durationSec = buffer.duration
-    const peaks = computePeaks(buffer, 0.05)
-    t.addClip({ buffer, startSec: cursor, gain: item.gain, peaks, offsetSec: 0, lengthSec: durationSec, peaksStepSec: 0.05 })
+    const peaks = computePeaks(buffer, 300)
+    t.addClip({ buffer, startSec: cursor, gain: item.gain, peaks })
     cursor = Math.round(cursor + durationSec + 1)
   }
 }
@@ -273,7 +265,6 @@ function updateSoloMute() {
 }
 
 async function play() {
-  if (engine.positionSec >= projectLengthSec.value) engine.positionSec = 0
   await engine.play(projectLengthSec.value)
   playheadPx.value = engine.positionSec * secPx.value
   startTick()
@@ -288,7 +279,6 @@ if (tracks.length === 0) addTrack()
 
 const dragging = reactive<{ active: boolean; tIdx: number; cIdx: number; startX: number; startSec: number } & { cross?: boolean }>({ active: false, tIdx: -1, cIdx: -1, startX: 0, startSec: 0, cross: false })
 const playheadDrag = reactive<{ active: boolean }>({ active: false })
-const clipResize = reactive<{ active: boolean; tIdx: number; cIdx: number; edge: 'left' | 'right'; startX: number; origStart: number; origOffset: number; origLength: number }>({ active: false, tIdx: -1, cIdx: -1, edge: 'left', startX: 0, origStart: 0, origOffset: 0, origLength: 0 })
 
 function onClipMouseDown(tIdx: number, cIdx: number, e: MouseEvent) {
   dragging.active = true
@@ -301,43 +291,7 @@ function onClipMouseDown(tIdx: number, cIdx: number, e: MouseEvent) {
   dragging.cross = true
 }
 
-function onResizeStart(tIdx: number, cIdx: number, edge: 'left' | 'right', e: MouseEvent) {
-  clipResize.active = true
-  clipResize.tIdx = tIdx
-  clipResize.cIdx = cIdx
-  clipResize.edge = edge
-  clipResize.startX = e.clientX
-  const item = tracks[tIdx]
-  const clip = item?.track.clips[cIdx]
-  clipResize.origStart = clip ? clip.startSec : 0
-  clipResize.origOffset = clip ? clip.offsetSec : 0
-  clipResize.origLength = clip ? clip.lengthSec : 0
-}
-
 function onPointerMove(e: PointerEvent) {
-  if (clipResize.active) {
-    const dx = e.clientX - clipResize.startX
-    const secStep = Math.round(dx / secPx.value)
-    const item = tracks[clipResize.tIdx]
-    const clip = item?.track.clips[clipResize.cIdx]
-    if (clip) {
-      const minLen = 0.1
-      if (clipResize.edge === 'left') {
-        const newStart = Math.max(0, Math.min(clipResize.origStart + secStep, clipResize.origStart + clipResize.origLength - minLen))
-        const newOffset = Math.max(0, Math.min(clipResize.origOffset + secStep, clip.buffer.duration - minLen))
-        const maxLength = Math.max(0, clip.buffer.duration - newOffset)
-        const newLength = Math.min(maxLength, clipResize.origLength - (newStart - clipResize.origStart))
-        clip.startSec = newStart
-        clip.offsetSec = newOffset
-        clip.lengthSec = Math.max(minLen, newLength)
-      } else {
-        const newLength = Math.max(minLen, Math.min(clipResize.origLength + secStep, clip.buffer.duration - clipResize.origOffset))
-        const projectLimit = Math.max(0, projectLengthSec.value - clip.startSec)
-        clip.lengthSec = Math.min(newLength, projectLimit)
-      }
-    }
-    return
-  }
   if (dragging.active) {
     const dx = e.clientX - dragging.startX
     const secStep = Math.round(dx / secPx.value)
@@ -369,7 +323,6 @@ function onPointerUp() {
   dragging.active = false
   playheadDrag.active = false
   resizing.value = false
-  clipResize.active = false
 }
 
 function startTick() {
@@ -377,13 +330,6 @@ function startTick() {
   const tick = () => {
     const elapsed = engine.ctx.currentTime - engine.playStartTime
     const sec = elapsed
-    if (sec >= projectLengthSec.value) {
-      stop()
-      playheadPx.value = 0
-      currentSeconds.value = 0
-      totalSeconds.value = projectLengthSec.value
-      return
-    }
     const maxPx = projectLengthSec.value * secPx.value
     playheadPx.value = Math.min(sec * secPx.value, maxPx)
     currentSeconds.value = sec
@@ -408,7 +354,16 @@ onMounted(() => {
     try {
       const url = e.detail?.url
       if (!url) return
-      await insertFromUrl(url)
+      const resp = await fetch(url)
+      const arr = await resp.arrayBuffer()
+      const buf = await engine.ctx.decodeAudioData(arr)
+      const item = tracks[tracks.length - 1]
+      const t = item ? item.track : engine.createTrack()
+      if (!item) tracks.push({ track: t, gain: 0.8, name: `Track ${tracks.length + 1}`, fx: { lp: 20000, hp: 20, comp: { threshold: -24, ratio: 2 } }, color: '#7c4dff', muted: false, solo: false, pan: 0, expanded: false })
+      const existingEnd = t.clips.reduce((max, c) => Math.max(max, c.startSec + c.buffer.duration), 0)
+      const startSec = Math.round(existingEnd)
+      const peaks = computePeaks(buf, 300)
+      t.addClip({ buffer: buf, startSec, gain: item ? item.gain : 0.8, peaks })
     } catch {}
   })
   updateSoloMute()
@@ -457,16 +412,6 @@ function withAlpha(hex: string, alpha: string) {
   return hex.length === 7 ? hex + alpha : hex
 }
 
-function waveColor(hex: string) {
-  if (!/^#([0-9a-fA-F]{6})$/.test(hex)) return '#9a7aff'
-  const r = parseInt(hex.slice(1, 3), 16)
-  const g = parseInt(hex.slice(3, 5), 16)
-  const b = parseInt(hex.slice(5, 7), 16)
-  const mix = (c: number) => Math.min(255, Math.floor(c + (255 - c) * 0.35))
-  const toHex = (n: number) => n.toString(16).padStart(2, '0')
-  return `#${toHex(mix(r))}${toHex(mix(g))}${toHex(mix(b))}`
-}
-
 function getTargetTrackIndex(clientY: number) {
   const rows = rowsRef.value
   if (!rows) return -1
@@ -498,17 +443,17 @@ function onMouseMove(e: MouseEvent) {
 }
 
 function onSidebarScroll(e: Event) {
+  const rows = rowsRef.value
   const el = e.target as HTMLElement
-  const t = timelineRef.value
-  if (!t) return
-  t.scrollTop = el.scrollTop
+  if (!rows) return
+  rows.scrollTop = el.scrollTop
 }
 
-function onTimelineScroll() {
+function onRowsScroll(e: Event) {
   const sidebar = document.querySelector('.sidebar') as HTMLElement | null
-  const t = timelineRef.value
-  if (!sidebar || !t) return
-  sidebar.scrollTop = t.scrollTop
+  const el = e.target as HTMLElement
+  if (!sidebar) return
+  sidebar.scrollTop = el.scrollTop
 }
 
 async function insertFromUrl(url: string) {
@@ -518,22 +463,19 @@ async function insertFromUrl(url: string) {
   const item = tracks[tracks.length - 1]
   const t = item ? item.track : engine.createTrack()
   if (!item) tracks.push({ track: t, gain: 0.8, name: `Track ${tracks.length + 1}`, fx: { lp: 20000, hp: 20, comp: { threshold: -24, ratio: 2 } }, color: '#7c4dff', muted: false, solo: false, pan: 0, expanded: false })
-  const existingEnd = t.clips.reduce((max, c) => Math.max(max, c.startSec + c.lengthSec), 0)
+  const existingEnd = t.clips.reduce((max, c) => Math.max(max, c.startSec + c.buffer.duration), 0)
   const startSec = Math.round(existingEnd)
-  const peaksStepSec = 0.05
-  const peaks = computePeaks(buf, peaksStepSec)
-  t.addClip({ buffer: buf, startSec, gain: item ? item.gain : 0.8, peaks, offsetSec: 0, lengthSec: buf.duration, peaksStepSec })
+  const peaks = computePeaks(buf, 300)
+  t.addClip({ buffer: buf, startSec, gain: item ? item.gain : 0.8, peaks })
 }
 
-function computePeaks(buffer: AudioBuffer, stepSec = 0.05): number[] {
+function computePeaks(buffer: AudioBuffer, samples = 200): number[] {
   const chData = [] as Float32Array[]
   for (let ch = 0; ch < buffer.numberOfChannels; ch++) chData.push(buffer.getChannelData(ch))
   const len = buffer.length
-  const sr = buffer.sampleRate
-  const block = Math.max(1, Math.floor(sr * stepSec))
-  const bars = Math.ceil(len / block)
+  const block = Math.floor(len / samples)
   const peaks: number[] = []
-  for (let i = 0; i < bars; i++) {
+  for (let i = 0; i < samples; i++) {
     const start = i * block
     const end = Math.min(len, start + block)
     let max = 0
@@ -557,139 +499,6 @@ function formatTime(s: number) {
   const sec = Math.floor(s % 60)
   return `${m}:${sec.toString().padStart(2, '0')}`
 }
-
-async function renderOffline(): Promise<AudioBuffer> {
-  const sr = engine.ctx.sampleRate
-  const lengthFrames = Math.ceil(projectLengthSec.value * sr)
-  const off = new OfflineAudioContext(2, lengthFrames, sr)
-  for (const item of tracks) {
-    const outGain = off.createGain()
-    outGain.gain.value = item.gain
-    const panner = off.createStereoPanner()
-    panner.pan.value = item.pan
-    const lp = off.createBiquadFilter()
-    lp.type = 'lowpass'
-    lp.frequency.value = item.fx.lp
-    const hp = off.createBiquadFilter()
-    hp.type = 'highpass'
-    hp.frequency.value = item.fx.hp
-    const comp = off.createDynamicsCompressor()
-    comp.threshold.value = item.fx.comp.threshold
-    comp.ratio.value = item.fx.comp.ratio
-    outGain.connect(panner)
-    panner.connect(lp)
-    lp.connect(hp)
-    hp.connect(comp)
-    comp.connect(off.destination)
-    for (const clip of item.track.clips) {
-      if (clip.startSec >= projectLengthSec.value) continue
-      const src = off.createBufferSource()
-      src.buffer = clip.buffer
-      const cg = off.createGain()
-      cg.gain.value = clip.gain
-      src.connect(cg)
-      cg.connect(outGain)
-      const playDur = Math.min(clip.lengthSec, Math.max(0, projectLengthSec.value - clip.startSec))
-      if (playDur <= 0) continue
-      src.start(clip.startSec, clip.offsetSec, playDur)
-    }
-  }
-  return await off.startRendering()
-}
-
-function floatTo16(input: Float32Array) {
-  const out = new Int16Array(input.length)
-  for (let i = 0; i < input.length; i++) {
-    const v = input[i] ?? 0
-    let s = Math.max(-1, Math.min(1, v))
-    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff
-  }
-  return out
-}
-
-async function exportMp3() {
-  const buf = await renderOffline()
-  const sr = buf.sampleRate
-  const left = buf.getChannelData(0)
-  const right = buf.numberOfChannels > 1 ? buf.getChannelData(1) : buf.getChannelData(0)
-  try {
-    const lame = await (async () => {
-      const g = window as any
-      if (g.lamejs) return g.lamejs
-      await new Promise<void>((resolve, reject) => {
-        const s = document.createElement('script')
-        s.src = 'https://unpkg.com/lamejs@1.2.0/lame.min.js'
-        s.onload = () => resolve()
-        s.onerror = () => reject(new Error('failed'))
-        document.head.appendChild(s)
-      })
-      return (window as any).lamejs
-    })()
-    const enc = new (lame as any).Mp3Encoder(2, sr, 128)
-    const block = 1152
-    const parts: BlobPart[] = []
-    for (let i = 0; i < left.length; i += block) {
-      const l = floatTo16(left.subarray(i, i + block))
-      const r = floatTo16(right.subarray(i, i + block))
-      const mp3buf = enc.encodeBuffer(l, r)
-      if (mp3buf && mp3buf.length > 0) parts.push(new Uint8Array(mp3buf as any))
-    }
-    const end = enc.flush()
-    if (end && end.length > 0) parts.push(new Uint8Array(end as any))
-    const blob = new Blob(parts, { type: 'audio/mpeg' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'mix.mp3'
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
-  } catch {
-    const wav = bufferToWav(buf)
-    const url = URL.createObjectURL(wav)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'mix.wav'
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
-  }
-}
-
-function bufferToWav(buffer: AudioBuffer) {
-  const numOfChan = Math.min(2, buffer.numberOfChannels)
-  const length = buffer.length * numOfChan * 2 + 44
-  const view = new DataView(new ArrayBuffer(length))
-  const writeString = (offset: number, s: string) => { for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i)) }
-  let offset = 0
-  writeString(offset, 'RIFF'); offset += 4
-  view.setUint32(offset, length - 8, true); offset += 4
-  writeString(offset, 'WAVE'); offset += 4
-  writeString(offset, 'fmt '); offset += 4
-  view.setUint32(offset, 16, true); offset += 4
-  view.setUint16(offset, 1, true); offset += 2
-  view.setUint16(offset, numOfChan, true); offset += 2
-  view.setUint32(offset, buffer.sampleRate, true); offset += 4
-  view.setUint32(offset, buffer.sampleRate * numOfChan * 2, true); offset += 4
-  view.setUint16(offset, numOfChan * 2, true); offset += 2
-  view.setUint16(offset, 16, true); offset += 2
-  writeString(offset, 'data'); offset += 4
-  view.setUint32(offset, length - offset - 4, true); offset += 4
-  const channels = [] as Float32Array[]
-  for (let i = 0; i < numOfChan; i++) channels.push(buffer.getChannelData(i))
-  let pos = 0
-  for (let i = 0; i < buffer.length; i++) {
-    for (let ch = 0; ch < numOfChan; ch++) {
-      const v = channels[ch]?.[i] ?? 0
-      let s = Math.max(-1, Math.min(1, v))
-      view.setInt16(offset + pos, s < 0 ? s * 0x8000 : s * 0x7fff, true)
-      pos += 2
-    }
-  }
-  return new Blob([view.buffer], { type: 'audio/wav' })
-}
 </script>
 
 <template>
@@ -706,15 +515,20 @@ function bufferToWav(buffer: AudioBuffer) {
         <label>长度(秒)
           <input type="number" v-model.number="projectLengthSec" min="4" max="3600" />
         </label>
-        <button class="btn" @click="exportMp3">导出MP3</button>
+        <label>缩放
+          <input type="range" :min="Math.max(20, Math.floor((timelineRef?.clientWidth || 600) / Math.max(1, projectLengthSec)))" max="240" step="5" v-model.number="secPx" />
+        </label>
+        <label>纵向
+          <input type="range" min="32" max="96" step="4" v-model.number="rowH" />
+        </label>
       </div>
     </header>
     <section style="padding:8px;">
       <MusicGenerator />
     </section>
     <main class="workspace" ref="workspaceRef">
-      <div class="sidebar" :style="{ width: sidebarW + 'px' }" @scroll="onSidebarScroll" style="padding-top: 12px">
-        <div class="tracks-header" style="padding-bottom: 14px;">
+      <div class="sidebar" :style="{ width: sidebarW + 'px' }" @scroll="onSidebarScroll">
+        <div class="tracks-header">
           <span>Tracks</span>
           <button class="btn" @click="addTrack">＋ 添加轨道</button>
         </div>
@@ -762,36 +576,24 @@ function bufferToWav(buffer: AudioBuffer) {
         </div>
       </div>
       <div class="splitter" @mousedown="onSplitterMouseDown"></div>
-      <section class="timeline" ref="timelineRef" @mousedown.self="onTimelineMouseDown" @scroll="onTimelineScroll">
+      <section class="timeline" ref="timelineRef" @mousedown.self="onTimelineMouseDown">
         <div class="ruler" :style="{ gridTemplateColumns: 'repeat(' + projectLengthSec + ', ' + secPx + 'px)' }">
-          <div v-for="n in projectLengthSec" :key="n" class="beat">{{ n % labelStep === 0 ? formatTime(n) : '' }}</div>
+          <div v-for="n in projectLengthSec" :key="n" class="beat">{{ n }}s</div>
         </div>
-        <div class="rows" ref="rowsRef">
+        <div class="rows" ref="rowsRef" @scroll="onRowsScroll">
           <div v-for="(item, idx) in tracks" :key="idx" class="clip-row" :style="{ height: rowH + 'px' }">
             <div class="clip" v-for="(clip, cIdx) in item.track.clips" :key="cIdx"
               @mousedown="(e) => onClipMouseDown(idx, cIdx, e)"
-              :style="{ left: clip.startSec * secPx + 'px', width: (Math.min(clip.lengthSec, Math.max(0, projectLengthSec - clip.startSec))) * secPx + 'px', top: Math.floor(rowH * 0.1) + 'px', height: Math.max(24, Math.floor(rowH * 0.8)) + 'px', borderColor: withAlpha(item.color, '55'), background: withAlpha(item.color, '22'), '--wave-color': waveColor(item.color) }">
-              <div class="wave" v-if="clip.peaks" :style="{ '--bars': Math.floor(clip.lengthSec / clip.peaksStepSec) }">
-                <span v-for="(p, i) in clip.peaks.slice(Math.floor(clip.offsetSec / clip.peaksStepSec), Math.floor(clip.offsetSec / clip.peaksStepSec) + Math.floor(clip.lengthSec / clip.peaksStepSec))" :key="i" :style="{ height: Math.max(2, Math.floor((Math.max(24, Math.floor(rowH * 0.8)) - 6) * p)) + 'px' }"></span>
+              :style="{ left: clip.startSec * secPx + 'px', width: (Math.min(clip.buffer.duration, Math.max(0, projectLengthSec - clip.startSec))) * secPx + 'px', borderColor: withAlpha(item.color, '55'), background: withAlpha(item.color, '22') }">
+              <div class="wave" v-if="clip.peaks" :style="{ '--bars': clip.peaks.length }">
+                <span v-for="(p, i) in clip.peaks" :key="i" :style="{ height: Math.max(2, Math.floor(28 * p)) + 'px' }"></span>
               </div>
-              <div class="handle left" @mousedown.stop="(e) => onResizeStart(idx, cIdx, 'left', e)"></div>
-              <div class="handle right" @mousedown.stop="(e) => onResizeStart(idx, cIdx, 'right', e)"></div>
             </div>
           </div>
         </div>
         <div class="playhead" :style="{ left: playheadPx + 'px' }" @mousedown.stop="playheadDrag.active = true"></div>
         <div class="project-progress" :style="{ width: Math.min(playheadPx, projectLengthSec * secPx) + 'px' }"></div>
       </section>
-      <div class="hud-bottom-left">
-        <div class="group">
-          <label>横向</label>
-          <input type="range" :min="Math.max(20, Math.floor((timelineRef?.clientWidth || 600) / Math.max(1, projectLengthSec)))" max="240" step="5" v-model.number="secPx" />
-        </div>
-        <div class="group">
-          <label>纵向</label>
-          <input type="range" min="32" max="96" step="4" v-model.number="rowH" />
-        </div>
-      </div>
     </main>
   </div>
   
@@ -807,35 +609,27 @@ function bufferToWav(buffer: AudioBuffer) {
 .btn.danger { border-color: #ff4d4f; color: #ffb3b6; background: #241317; }
 .btn.small { padding: 4px 8px; border-radius: 999px; }
 .btn.small.active { background: #263043; border-color: #7c4dff; }
-.workspace { position: relative; display: grid; grid-template-columns: auto 6px 1fr; height: calc(100vh - 52px); }
-.sidebar { border-right: 1px solid #1a212b; padding: 0 8px 8px; overflow-y: auto; background: #0d131b; }
+.workspace { display: grid; grid-template-columns: auto 6px 1fr; height: calc(100vh - 52px); }
+.sidebar { border-right: 1px solid #1a212b; padding: 8px; overflow-y: auto; background: #0d131b; }
 .splitter { background: #1a212b; cursor: col-resize; }
-.tracks-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0; }
+.tracks-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .tracks-header { position: sticky; top: 0; height: 24px; background: #0d131b; z-index: 3; }
-.track-row { position: relative; display: grid; grid-template-columns: 1fr 80px 140px 60px; align-items: center; gap: 8px; border-bottom: 1px dashed #1a212b; padding: 0; }
+.track-row { position: relative; display: grid; grid-template-columns: 1fr 80px 140px 60px; align-items: center; gap: 8px; border-bottom: 1px dashed #1a212b; padding: 6px 0; }
 .name-input { width: 100%; padding: 6px 8px; border: 1px solid #1a212b; border-radius: 6px; background: #0b0f14; color: #e6e8eb; }
 .name-input.compact { padding: 6px 8px; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
-.details { position: absolute; left: 8px; right: 8px; top: calc(100% + 4px); grid-column: 1 / -1; display: grid; gap: 8px; background: #0b0f14; border: 1px solid #1a212b; border-radius: 8px; padding: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.35); z-index: 1000; }
-.track-row { overflow: visible; }
-.cell.actions { position: relative; z-index: 1; }
+.details { position: absolute; left: 8px; right: 8px; top: 40px; grid-column: 1 / -1; display: grid; gap: 8px; background: #0b0f14; border: 1px solid #1a212b; border-radius: 8px; padding: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.35); z-index: 10; }
 .detail-row { display: grid; grid-template-columns: 80px 1fr auto; align-items: center; gap: 8px; }
 .timeline { position: relative; overflow: auto; background: #0b0f14; }
-.ruler { position: sticky; top: 24px; display: grid; align-items: center; grid-auto-rows: 24px; border-bottom: 1px solid #1a212b; background: #0d131b; z-index: 2; }
+.ruler { position: sticky; top: 0; display: grid; align-items: center; grid-auto-rows: 24px; border-bottom: 1px solid #1a212b; background: #0d131b; z-index: 2; }
 .beat { padding: 4px; border-left: 1px solid #1a212b; font-size: 12px; color: #a6acb2; }
-.rows { position: relative; margin-top: 24px; }
+.rows { position: relative; }
 .clip-row { position: relative; border-bottom: 1px dashed #1a212b; }
 .clip { position: absolute; top: 8px; height: 32px; border: 1px solid; border-radius: 6px; cursor: grab; }
 .clip:active { cursor: grabbing; }
-.clip .handle { position: absolute; top: 0; bottom: 0; width: 6px; background: transparent; }
-.clip .handle.left { left: -3px; cursor: ew-resize; }
-.clip .handle.right { right: -3px; cursor: ew-resize; }
 .wave { position: absolute; inset: 2px 4px; display: grid; grid-template-columns: repeat(var(--bars), 1fr); align-items: end; gap: 1px; }
-.wave span { display: block; width: auto; background: var(--wave-color); border-radius: 1px; }
+.wave span { display: block; width: auto; background: #9a7aff; border-radius: 1px; }
 .file { position: relative; display: inline-flex; align-items: center; justify-content: center; }
 .file input { position: absolute; inset: 0; opacity: 0.001; cursor: pointer; }
 .playhead { position: absolute; top: 24px; bottom: 0; width: 0; border-left: 2px solid #ffcf66; }
 .project-progress { position: absolute; top: 24px; height: 2px; background: #ffcf6644; left: 0; }
-.hud-bottom-left { position: absolute; left: 12px; bottom: 12px; display: inline-flex; gap: 12px; padding: 8px 10px; background: rgba(13,19,27,0.9); border: 1px solid #1a212b; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.25); z-index: 1001; }
-.hud-bottom-left .group { display: inline-flex; align-items: center; gap: 8px; }
-.hud-bottom-left label { color: #a6acb2; font-size: 12px; }
 </style>
