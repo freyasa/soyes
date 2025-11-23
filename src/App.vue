@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import MusicGenerator from './components/MusicGenerator.vue'
 
 type Clip = {
   buffer: AudioBuffer
@@ -349,6 +350,22 @@ onMounted(() => {
   window.addEventListener('pointerup', onPointerUp)
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('mousemove', onMouseMove)
+  window.addEventListener('music-generated', async (e: any) => {
+    try {
+      const url = e.detail?.url
+      if (!url) return
+      const resp = await fetch(url)
+      const arr = await resp.arrayBuffer()
+      const buf = await engine.ctx.decodeAudioData(arr)
+      const item = tracks[tracks.length - 1]
+      const t = item ? item.track : engine.createTrack()
+      if (!item) tracks.push({ track: t, gain: 0.8, name: `Track ${tracks.length + 1}`, fx: { lp: 20000, hp: 20, comp: { threshold: -24, ratio: 2 } }, color: '#7c4dff', muted: false, solo: false, pan: 0, expanded: false })
+      const existingEnd = t.clips.reduce((max, c) => Math.max(max, c.startSec + c.buffer.duration), 0)
+      const startSec = Math.round(existingEnd)
+      const peaks = computePeaks(buf, 300)
+      t.addClip({ buffer: buf, startSec, gain: item ? item.gain : 0.8, peaks })
+    } catch {}
+  })
   updateSoloMute()
 })
 
@@ -439,6 +456,19 @@ function onRowsScroll(e: Event) {
   sidebar.scrollTop = el.scrollTop
 }
 
+async function insertFromUrl(url: string) {
+  const resp = await fetch(url)
+  const arr = await resp.arrayBuffer()
+  const buf = await engine.ctx.decodeAudioData(arr)
+  const item = tracks[tracks.length - 1]
+  const t = item ? item.track : engine.createTrack()
+  if (!item) tracks.push({ track: t, gain: 0.8, name: `Track ${tracks.length + 1}`, fx: { lp: 20000, hp: 20, comp: { threshold: -24, ratio: 2 } }, color: '#7c4dff', muted: false, solo: false, pan: 0, expanded: false })
+  const existingEnd = t.clips.reduce((max, c) => Math.max(max, c.startSec + c.buffer.duration), 0)
+  const startSec = Math.round(existingEnd)
+  const peaks = computePeaks(buf, 300)
+  t.addClip({ buffer: buf, startSec, gain: item ? item.gain : 0.8, peaks })
+}
+
 function computePeaks(buffer: AudioBuffer, samples = 200): number[] {
   const chData = [] as Float32Array[]
   for (let ch = 0; ch < buffer.numberOfChannels; ch++) chData.push(buffer.getChannelData(ch))
@@ -493,6 +523,9 @@ function formatTime(s: number) {
         </label>
       </div>
     </header>
+    <section style="padding:8px;">
+      <MusicGenerator />
+    </section>
     <main class="workspace" ref="workspaceRef">
       <div class="sidebar" :style="{ width: sidebarW + 'px' }" @scroll="onSidebarScroll">
         <div class="tracks-header">
